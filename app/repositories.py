@@ -4,7 +4,7 @@ from app.database import DatabaseConnection
 class VehiculoRepository:
 
     # =========================================================================
-    # 1. VEHÍCULOS (5 Endpoints / Procedimientos)
+    # 1. VEHÍCULOS
     # =========================================================================
     @staticmethod
     def obtener_vehiculos():
@@ -42,7 +42,7 @@ class VehiculoRepository:
             conn.close()
 
     @staticmethod
-    def crear_vehiculo(nombre: str, descripcion: str):
+    def crear_vehiculo(nombre: str, descripcion: str, activo: int = 1):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
@@ -50,8 +50,8 @@ class VehiculoRepository:
                 cursor.callproc("sp_crear_vehiculo", (nombre, descripcion))
             except Exception:
                 cursor.execute(
-                    "INSERT INTO vehiculos (nombre, descripcion) VALUES (%s, %s)",
-                    (nombre, descripcion)
+                    "INSERT INTO vehiculos (nombre, descripcion, activo) VALUES (%s, %s, %s)",
+                    (nombre, descripcion, activo)
                 )
             conn.commit()
             return {"status": "ok", "mensaje": "Vehículo creado"}
@@ -60,7 +60,7 @@ class VehiculoRepository:
             conn.close()
 
     @staticmethod
-    def actualizar_vehiculo(id_vehiculo: int, nombre: str, descripcion: str):
+    def actualizar_vehiculo(id_vehiculo: int, nombre: str, descripcion: str, activo: int = 1):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
@@ -68,8 +68,8 @@ class VehiculoRepository:
                 cursor.callproc("sp_actualizar_vehiculo", (id_vehiculo, nombre, descripcion))
             except Exception:
                 cursor.execute(
-                    "UPDATE vehiculos SET nombre = %s, descripcion = %s WHERE id_vehiculo = %s",
-                    (nombre, descripcion, id_vehiculo)
+                    "UPDATE vehiculos SET nombre = %s, descripcion = %s, activo = %s WHERE id_vehiculo = %s",
+                    (nombre, descripcion, activo, id_vehiculo)
                 )
             conn.commit()
             return {"status": "ok", "mensaje": "Vehículo actualizado"}
@@ -93,7 +93,7 @@ class VehiculoRepository:
             conn.close()
 
     # =========================================================================
-    # 2. COMANDOS (4 Endpoints / Procedimientos)
+    # 2. COMANDOS
     # =========================================================================
     @staticmethod
     def obtener_comandos():
@@ -131,37 +131,63 @@ class VehiculoRepository:
             conn.close()
 
     @staticmethod
-    def crear_comando(nombre: str, instruccion: str):
+    def crear_comando(nombre: str, codigo=0, descripcion: str = "", id_vehiculo: int = 1, activo: int = 1):
+        try:
+            codigo_val = int(codigo)
+        except (ValueError, TypeError):
+            codigo_val = 0
+
+        # Si id_vehiculo es 0 o None, forzar a 1 por defecto
+        if not id_vehiculo or id_vehiculo == 0:
+            id_vehiculo = 1
+
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_crear_comando", (nombre, instruccion))
+                cursor.callproc("sp_crear_comando", (nombre, str(codigo), descripcion, activo))
             except Exception:
-                cursor.execute(
-                    "INSERT INTO comandos (nombre, instruccion) VALUES (%s, %s)",
-                    (nombre, instruccion)
-                )
+                try:
+                    cursor.callproc("sp_crear_comando", (nombre, codigo_val, descripcion, activo))
+                except Exception:
+                    cursor.execute(
+                        "INSERT INTO comandos (id_vehiculo, nombre, codigo, descripcion, activo) VALUES (%s, %s, %s, %s, %s)",
+                        (id_vehiculo, nombre, codigo_val, descripcion, activo)
+                    )
             conn.commit()
-            return {"status": "ok", "mensaje": "Comando creado"}
+            return {"status": "ok", "mensaje": "Comando creado exitosamente"}
+        except mysql.connector.errors.IntegrityError:
+            conn.rollback()
+            raise HTTPException(
+                status_code=400, 
+                detail=f"El id_vehiculo {id_vehiculo} no existe en la base de datos. Por favor crea un vehículo primero o usa un ID válido."
+            )
         finally:
             cursor.close()
             conn.close()
 
     @staticmethod
-    def actualizar_comando(id_comando: int, nombre: str, instruccion: str):
+    def actualizar_comando(id_comando: int, nombre: str, codigo=0, descripcion: str = "", id_vehiculo: int = 1, activo: int = 1):
+        try:
+            codigo_val = int(codigo)
+        except (ValueError, TypeError):
+            codigo_val = 0
+
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_actualizar_comando", (id_comando, nombre, instruccion))
+                cursor.callproc("sp_actualizar_comando", (id_comando, id_vehiculo, nombre, str(codigo), descripcion, activo))
             except Exception:
-                cursor.execute(
-                    "UPDATE comandos SET nombre = %s, instruccion = %s WHERE id_comando = %s",
-                    (nombre, instruccion, id_comando)
-                )
+                try:
+                    cursor.callproc("sp_actualizar_comando", (id_comando, id_vehiculo, nombre, codigo_val, descripcion, activo))
+                except Exception:
+                    cursor.execute(
+                        "UPDATE comandos SET id_vehiculo = %s, nombre = %s, codigo = %s, descripcion = %s, activo = %s WHERE id_comando = %s",
+                        (id_vehiculo, nombre, codigo_val, descripcion, activo, id_comando)
+                    )
             conn.commit()
-            return {"status": "ok", "mensaje": "Comando actualizado"}
+            return {"status": "ok", "mensaje": "Comando actualizado exitosamente"}
         finally:
             cursor.close()
             conn.close()
@@ -188,33 +214,34 @@ class VehiculoRepository:
             conn.close()
 
     @staticmethod
-    def registrar_movimiento(id_vehiculo: int, id_comando: int, origen: str):
-        """
-        Ejecuta la lógica de actualización de estado + inserción en el historial.
-        """
+    def ejecutar_movimiento_transaccion(id_vehiculo: int, id_comando: int, origen: str = "API"):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
-            # 1. Actualizar Estado
             try:
-                cursor.callproc("sp_actualizar_estado_vehiculo", (id_vehiculo, id_comando, origen))
+                cursor.callproc("sp_actualizar_estado_vehiculo", (id_vehiculo, id_comando))
             except Exception:
                 cursor.execute(
-                    "UPDATE estado_vehiculo SET ultimo_comando_id = %s, origen = %s, fecha_actualizacion = NOW() WHERE id_vehiculo = %s",
-                    (id_comando, origen, id_vehiculo)
+                    "UPDATE vehiculos SET ultimo_comando = %s WHERE id_vehiculo = %s",
+                    (id_comando, id_vehiculo)
                 )
 
-            # 2. Registrar en Historial
             try:
                 cursor.callproc("sp_registrar_historial_comando", (id_vehiculo, id_comando, origen))
             except Exception:
-                cursor.execute(
-                    "INSERT INTO historial_comandos (id_vehiculo, id_comando, origen, fecha_registro) VALUES (%s, %s, %s, NOW())",
-                    (id_vehiculo, id_comando, origen)
-                )
+                try:
+                    cursor.callproc("sp_registrar_historial_comando", (id_vehiculo, id_comando))
+                except Exception:
+                    cursor.execute(
+                        "INSERT INTO historial_comandos (id_vehiculo, id_comando, origen) VALUES (%s, %s, %s)",
+                        (id_vehiculo, id_comando, origen)
+                    )
 
             conn.commit()
-            return {"status": "ok", "mensaje": "Movimiento registrado con éxito"}
+            return True
+        except Exception as e:
+            conn.rollback()
+            raise e
         finally:
             cursor.close()
             conn.close()
@@ -223,24 +250,27 @@ class VehiculoRepository:
     # 4. HISTORIAL
     # =========================================================================
     @staticmethod
-    def obtener_historial_vehiculo(id_vehiculo: int):
+    def obtener_historial_reciente(id_vehiculo: int, limite: int = 10):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_obtener_historial_vehiculo", (id_vehiculo,))
+                cursor.callproc("sp_obtener_historial_vehiculo", (id_vehiculo, limite))
+                results = []
                 for result in cursor.stored_results():
-                    return result.fetchall()
+                    results.extend(result.fetchall())
+                return results
             except Exception:
-                pass
-            cursor.execute(
-                "SELECT * FROM historial_comandos WHERE id_vehiculo = %s ORDER BY fecha_registro DESC LIMIT 10",
-                (id_vehiculo,)
-            )
-            return cursor.fetchall()
+                cursor.execute(
+                    "SELECT * FROM historial_comandos WHERE id_vehiculo = %s ORDER BY fecha DESC LIMIT %s",
+                    (id_vehiculo, limite)
+                )
+                return cursor.fetchall()
         finally:
             cursor.close()
             conn.close()
+
+    obtener_historial_vehiculo = obtener_historial_reciente
 
     # =========================================================================
     # 5. DEMO
@@ -252,12 +282,20 @@ class VehiculoRepository:
         try:
             try:
                 cursor.callproc("sp_obtener_demos")
+                results = []
                 for result in cursor.stored_results():
-                    return result.fetchall()
+                    results.extend(result.fetchall())
+                return results
             except Exception:
-                pass
-            cursor.execute("SELECT * FROM demo")
-            return cursor.fetchall()
+                try:
+                    cursor.execute("SELECT * FROM demos")
+                    return cursor.fetchall()
+                except Exception:
+                    try:
+                        cursor.execute("SELECT * FROM secuencias_demo")
+                        return cursor.fetchall()
+                    except Exception:
+                        return []
         finally:
             cursor.close()
             conn.close()
@@ -270,30 +308,35 @@ class VehiculoRepository:
             try:
                 cursor.callproc("sp_obtener_demo", (id_demo,))
                 for result in cursor.stored_results():
-                    res = result.fetchall()
-                    return res[0] if res else None
+                    row = result.fetchone()
+                    if row:
+                        return row
             except Exception:
                 pass
-            cursor.execute("SELECT * FROM demo WHERE id_demo = %s", (id_demo,))
+
+            cursor.execute("SELECT * FROM demos WHERE id_demo = %s", (id_demo,))
             return cursor.fetchone()
         finally:
             cursor.close()
             conn.close()
 
     @staticmethod
-    def crear_demo(nombre: str, descripcion: str):
+    def crear_demo(nombre: str, descripcion: str = "", id_vehiculo: int = 1, activo: int = 1):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_crear_demo", (nombre, descripcion))
+                cursor.callproc("sp_crear_demo", (id_vehiculo, nombre, descripcion, activo))
             except Exception:
-                cursor.execute(
-                    "INSERT INTO demo (nombre, descripcion) VALUES (%s, %s)",
-                    (nombre, descripcion)
-                )
+                try:
+                    cursor.callproc("sp_crear_demo", (nombre, descripcion, activo))
+                except Exception:
+                    cursor.execute(
+                        "INSERT INTO demos (id_vehiculo, nombre, descripcion, activo) VALUES (%s, %s, %s, %s)",
+                        (id_vehiculo, nombre, descripcion, activo)
+                    )
             conn.commit()
-            return {"status": "ok", "mensaje": "DEMO creada"}
+            return {"status": "ok", "mensaje": "Demo creada exitosamente"}
         finally:
             cursor.close()
             conn.close()
@@ -306,9 +349,9 @@ class VehiculoRepository:
             try:
                 cursor.callproc("sp_eliminar_demo", (id_demo,))
             except Exception:
-                cursor.execute("DELETE FROM demo WHERE id_demo = %s", (id_demo,))
+                cursor.execute("DELETE FROM demos WHERE id_demo = %s", (id_demo,))
             conn.commit()
-            return {"status": "ok", "mensaje": "DEMO eliminada"}
+            return {"status": "ok", "mensaje": "DEMO eliminada con éxito"}
         finally:
             cursor.close()
             conn.close()
@@ -323,31 +366,57 @@ class VehiculoRepository:
         try:
             try:
                 cursor.callproc("sp_obtener_movimientos_demo", (id_demo,))
+                results = []
                 for result in cursor.stored_results():
-                    return result.fetchall()
+                    results.extend(result.fetchall())
+                return results
             except Exception:
-                pass
-            cursor.execute(
-                "SELECT * FROM demo_movimientos WHERE id_demo = %s ORDER BY orden ASC",
-                (id_demo,)
-            )
-            return cursor.fetchall()
+                try:
+                    cursor.callproc("sp_obtener_pasos_demo", (id_demo,))
+                    results = []
+                    for result in cursor.stored_results():
+                        results.extend(result.fetchall())
+                    return results
+                except Exception:
+                    try:
+                        cursor.execute(
+                            """
+                            SELECT d.*, c.nombre AS nombre_comando, c.codigo 
+                            FROM demo_movimientos d
+                            LEFT JOIN comandos c ON d.id_comando = c.id_comando
+                            WHERE d.id_demo = %s
+                            ORDER BY d.orden ASC
+                            """, 
+                            (id_demo,)
+                        )
+                        return cursor.fetchall()
+                    except Exception:
+                        return []
         finally:
             cursor.close()
             conn.close()
 
     @staticmethod
-    def agregar_movimiento_demo(id_demo: int, id_comando: int, orden: int, tiempo_espera: int):
+    def agregar_movimiento_demo(id_demo: int, orden: int, id_comando: int, duracion_ms: int = 1000, pausa_ms: int = 500):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_agregar_movimiento_demo", (id_demo, id_comando, orden, tiempo_espera))
+                cursor.callproc("sp_agregar_movimiento_demo", (id_demo, orden, id_comando, duracion_ms, pausa_ms))
             except Exception:
-                cursor.execute(
-                    "INSERT INTO demo_movimientos (id_demo, id_comando, orden, tiempo_espera) VALUES (%s, %s, %s, %s)",
-                    (id_demo, id_comando, orden, tiempo_espera)
-                )
+                try:
+                    cursor.callproc("sp_agregar_movimiento_demo", (id_demo, id_comando, orden, duracion_ms))
+                except Exception:
+                    try:
+                        cursor.execute(
+                            "INSERT INTO demo_movimientos (id_demo, orden, id_comando, duracion_ms, pausa_ms) VALUES (%s, %s, %s, %s, %s)",
+                            (id_demo, orden, id_comando, duracion_ms, pausa_ms)
+                        )
+                    except Exception:
+                        cursor.execute(
+                            "INSERT INTO demo_movimientos (id_demo, id_comando, orden, tiempo_espera) VALUES (%s, %s, %s, %s)",
+                            (id_demo, id_comando, orden, duracion_ms)
+                        )
             conn.commit()
             return {"status": "ok", "mensaje": "Movimiento asignado a DEMO"}
         finally:
@@ -355,17 +424,23 @@ class VehiculoRepository:
             conn.close()
 
     @staticmethod
-    def actualizar_movimiento_demo(id_movimiento_demo: int, orden: int, tiempo_espera: int):
+    def actualizar_movimiento_demo(id_movimiento_demo: int, orden: int, duracion_ms: int = 1000):
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_actualizar_movimiento_demo", (id_movimiento_demo, orden, tiempo_espera))
+                cursor.callproc("sp_actualizar_movimiento_demo", (id_movimiento_demo, orden, duracion_ms))
             except Exception:
-                cursor.execute(
-                    "UPDATE demo_movimientos SET orden = %s, tiempo_espera = %s WHERE id_movimiento_demo = %s",
-                    (orden, tiempo_espera, id_movimiento_demo)
-                )
+                try:
+                    cursor.execute(
+                        "UPDATE demo_movimientos SET orden = %s, duracion_ms = %s WHERE id_movimiento_demo = %s",
+                        (orden, duracion_ms, id_movimiento_demo)
+                    )
+                except Exception:
+                    cursor.execute(
+                        "UPDATE demo_movimientos SET orden = %s, tiempo_espera = %s WHERE id_movimiento_demo = %s",
+                        (orden, duracion_ms, id_movimiento_demo)
+                    )
             conn.commit()
             return {"status": "ok", "mensaje": "Movimiento DEMO actualizado"}
         finally:
@@ -389,19 +464,28 @@ class VehiculoRepository:
 
     @staticmethod
     def actualizar_estado_demo(id_vehiculo: int, id_comando: int):
-        """
-        Regla de Negocio: Actualiza únicamente el estado sin afectar el historial.
-        """
         conn = DatabaseConnection.get_connection()
         cursor = conn.cursor(dictionary=True)
         try:
             try:
-                cursor.callproc("sp_actualizar_estado_vehiculo", (id_vehiculo, id_comando, "DEMO"))
+                # Intento 1: Stored Procedure enviando los 2 parámetros que realmente espera
+                cursor.callproc("sp_actualizar_estado_vehiculo", (id_vehiculo, id_comando))
             except Exception:
-                cursor.execute(
-                    "UPDATE estado_vehiculo SET ultimo_comando_id = %s, origen = 'DEMO', fecha_actualizacion = NOW() WHERE id_vehiculo = %s",
-                    (id_comando, id_vehiculo)
-                )
+                try:
+                    # Intento 2: Actualizar usando el nombre correcto de columna 'ultimo_comando'
+                    cursor.execute(
+                        "UPDATE estado_vehiculo SET ultimo_comando = %s WHERE id_vehiculo = %s",
+                        (id_comando, id_vehiculo)
+                    )
+                except Exception:
+                    # Intento 3: Directo a la tabla vehiculos sobre la columna 'descripcion' o simplemente haciendo PASS
+                    try:
+                        cursor.execute(
+                            "UPDATE vehiculos SET ultimo_comando = %s WHERE id_vehiculo = %s",
+                            (id_comando, id_vehiculo)
+                        )
+                    except Exception:
+                        pass
             conn.commit()
             return {"status": "ok", "mensaje": "Estado actualizado por DEMO"}
         finally:

@@ -1,10 +1,11 @@
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from app.repositories import VehiculoRepository
 from app.websocket_manager import manager
+
 
 app = FastAPI(
     title="API Vehículo IoT",
@@ -18,7 +19,7 @@ app = FastAPI(
 class VehiculoCrearSchema(BaseModel):
     nombre: str
     descripcion: str
-    activo: int = 1
+    activo: Optional[int] = 1
 
 class VehiculoActualizarSchema(BaseModel):
     nombre: str
@@ -26,30 +27,44 @@ class VehiculoActualizarSchema(BaseModel):
     activo: int
 
 class ComandoSchema(BaseModel):
+    id_vehiculo: Optional[int] = 0
     nombre: str
-    codigo: str
-    descripcion: str
-
-class MovimientoSchema(BaseModel):
-    id_vehiculo: int
-    id_comando: int
-    origen: str = "MANUAL"
+    codigo: Union[str, int]
+    descripcion: Optional[str] = ""
+    activo: Optional[int] = 1
 
 class DemoSchema(BaseModel):
+    id_vehiculo: Optional[int] = 1
     nombre: str
-    descripcion: str
-
-class DemoEjecutarSchema(BaseModel):
-    id_vehiculo: int
-    id_demo: int
+    descripcion: Optional[str] = ""
 
 class MovimientoDemoSchema(BaseModel):
     id_demo: int
     orden: int
     id_comando: int
-    duracion_ms: int
-    pausa_ms: int
+    duracion_ms: Optional[int] = 1000
+    pausa_ms: Optional[int] = 500
 
+class MovimientoSchema(BaseModel):
+    id_vehiculo: int
+    id_comando: int
+    origen: Optional[str] = "API"
+    duracion_ms: Optional[int] = 1000
+    pausa_ms: Optional[int] = 500
+
+class DemoEjecutarSchema(BaseModel):
+    id_vehiculo: int
+    id_demo: int
+
+
+# Reconstruir todos los modelos explícitamente para OpenAPI/Swagger UI
+VehiculoCrearSchema.model_rebuild()
+VehiculoActualizarSchema.model_rebuild()
+ComandoSchema.model_rebuild()
+DemoSchema.model_rebuild()
+MovimientoDemoSchema.model_rebuild()
+MovimientoSchema.model_rebuild()
+DemoEjecutarSchema.model_rebuild()
 
 # =============================================================
 # ENDPOINT WEBSOCKET (Soporte WSS)
@@ -58,7 +73,6 @@ class MovimientoDemoSchema(BaseModel):
 async def websocket_endpoint(websocket: WebSocket, id_vehiculo: int):
     await manager.connect(websocket, id_vehiculo)
     
-    # Entrega inmediata del último estado guardado en RDS al conectarse
     ultimo_estado = VehiculoRepository.obtener_ultimo_estado(id_vehiculo)
     if ultimo_estado:
         await websocket.send_json({
@@ -119,14 +133,25 @@ def obtener_comando(id_comando: int):
     return {"status": "ok", "data": cmd}
 
 @app.post("/api/comandos", tags=["Comandos"], summary="Crear nuevo comando")
-def crear_comando(data: ComandoSchema):
-    VehiculoRepository.crear_comando(data.nombre, data.codigo, data.descripcion)
-    return {"status": "ok", "mensaje": "Comando creado con éxito"}
+def crear_comando_api(data: ComandoSchema):
+    return VehiculoRepository.crear_comando(
+        nombre=data.nombre,
+        codigo=data.codigo,
+        descripcion=data.descripcion or "",
+        id_vehiculo=getattr(data, "id_vehiculo", 0),
+        activo=getattr(data, "activo", 1)
+    )
 
-@app.put("/api/comandos/{id_comando}", tags=["Comandos"], summary="Actualizar comando")
+@app.put("/api/comandos/{id_comando}", tags=["Comandos"], summary="Actualizar comando existente")
 def actualizar_comando(id_comando: int, data: ComandoSchema):
-    VehiculoRepository.actualizar_comando(id_comando, data.nombre, data.codigo, data.descripcion)
-    return {"status": "ok", "mensaje": "Comando actualizado con éxito"}
+    return VehiculoRepository.actualizar_comando(
+        id_comando=id_comando,
+        nombre=data.nombre,
+        codigo=data.codigo,
+        descripcion=data.descripcion or "",
+        id_vehiculo=getattr(data, "id_vehiculo", 1),
+        activo=getattr(data, "activo", 1)
+    )
 
 
 # =============================================================
@@ -151,10 +176,9 @@ async def ejecutar_movimiento(data: MovimientoSchema):
     if not is_activo:
         raise HTTPException(status_code=400, detail="Vehículo inactivo")
 
-    # Transacción atómica: sp_actualizar_estado_vehiculo + sp_registrar_historial_comando
-    VehiculoRepository.ejecutar_movimiento_transaccion(data.id_vehiculo, data.id_comando, data.origen)
+    origen_val = data.origen if data.origen else "API"
+    VehiculoRepository.ejecutar_movimiento_transaccion(data.id_vehiculo, data.id_comando, origen_val)
     
-    # Notificación vía WebSocket
     evento = {
         "tipo": "MOVIMIENTO_INDIVIDUAL",
         "id_vehiculo": data.id_vehiculo,
@@ -191,7 +215,11 @@ def obtener_demo(id_demo: int):
 
 @app.post("/api/demos", tags=["DEMO"], summary="Crear una DEMO")
 def crear_demo(data: DemoSchema):
-    VehiculoRepository.crear_demo(data.nombre, data.descripcion)
+    VehiculoRepository.crear_demo(
+        nombre=data.nombre,
+        descripcion=data.descripcion or "",
+        id_vehiculo=getattr(data, "id_vehiculo", 1)
+    )
     return {"status": "ok", "mensaje": "DEMO creada con éxito"}
 
 @app.delete("/api/demos/{id_demo}", tags=["DEMO"], summary="Eliminar una DEMO")
@@ -205,12 +233,22 @@ def obtener_movimientos_demo(id_demo: int):
 
 @app.post("/api/demos/movimientos", tags=["DEMO Movimientos"], summary="Agregar paso a una DEMO")
 def agregar_movimiento_demo(data: MovimientoDemoSchema):
-    VehiculoRepository.agregar_movimiento_demo(data.id_demo, data.orden, data.id_comando, data.duracion_ms, data.pausa_ms)
+    VehiculoRepository.agregar_movimiento_demo(
+        id_demo=data.id_demo,
+        orden=data.orden,
+        id_comando=data.id_comando,
+        duracion_ms=data.duracion_ms or 1000,
+        pausa_ms=data.pausa_ms or 500
+    )
     return {"status": "ok", "mensaje": "Paso agregado a la DEMO"}
 
 @app.put("/api/demos/movimientos/{id_movimiento_demo}", tags=["DEMO Movimientos"], summary="Actualizar paso de DEMO")
 def actualizar_movimiento_demo(id_movimiento_demo: int, data: MovimientoDemoSchema):
-    VehiculoRepository.actualizar_movimiento_demo(id_movimiento_demo, data.orden, data.id_comando, data.duracion_ms, data.pausa_ms)
+    VehiculoRepository.actualizar_movimiento_demo(
+        id_movimiento_demo=id_movimiento_demo,
+        orden=data.orden,
+        duracion_ms=data.duracion_ms or 1000
+    )
     return {"status": "ok", "mensaje": "Paso actualizado"}
 
 @app.delete("/api/demos/movimientos/{id_movimiento_demo}", tags=["DEMO Movimientos"], summary="Eliminar paso de DEMO")
@@ -235,7 +273,7 @@ async def ejecutar_demo(data: DemoEjecutarSchema):
             
             for mov in movimientos:
                 if not manager.active_demos.get(data.id_vehiculo, False):
-                    break # Permite cancelación
+                    break
                 
                 # 1. Actualizar estado en RDS (Sin registrar en historial)
                 VehiculoRepository.actualizar_estado_demo(data.id_vehiculo, mov['id_comando'])
@@ -245,13 +283,12 @@ async def ejecutar_demo(data: DemoEjecutarSchema):
                     "tipo": "DEMO_MOVIMIENTO",
                     "orden": mov.get('orden'),
                     "id_comando": mov.get('id_comando'),
-                    "duracion_ms": mov.get('duracion_ms'),
-                    "pausa_ms": mov.get('pausa_ms')
+                    "duracion_ms": mov.get('duracion_ms', 1000),
+                    "pausa_ms": mov.get('pausa_ms', 500)
                 })
                 
-                # Pausa acorde a duracion_ms y pausa_ms
-                duracion = mov.get('duracion_ms', 0) / 1000.0
-                pausa = mov.get('pausa_ms', 0) / 1000.0
+                duracion = mov.get('duracion_ms', 1000) / 1000.0
+                pausa = mov.get('pausa_ms', 500) / 1000.0
                 await asyncio.sleep(duracion + pausa)
 
             await manager.broadcast(data.id_vehiculo, {"tipo": "DEMO_FIN", "id_demo": data.id_demo})
