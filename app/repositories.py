@@ -1,5 +1,6 @@
 import mysql.connector
 from app.database import DatabaseConnection
+from fastapi import HTTPException
 
 class VehiculoRepository:
 
